@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Audio Player with Fade-Out Timer</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f7;
+        }
+        .player-container {
+            background-color: white;
+            border-radius: 10px;
+            padding: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            font-size: 24px;
+            margin-bottom: 20px;
+        }
+        .control-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+            color: #555;
+        }
+        button {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            padding: 8px 15px;
+            border-radius: 5px;
+            margin-right: 10px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        input[type="range"] {
+            width: 100%;
+        }
+        input[type="number"] {
+            width: 80px;
+            padding: 5px;
+            border-radius: 5px;
+            border: 1px solid #ccc;
+        }
+        .status {
+            font-style: italic;
+            color: #666;
+            margin-top: 20px;
+        }
+        .value-display {
+            display: inline-block;
+            width: 50px;
+            text-align: right;
+            margin-left: 10px;
+        }
+        .file-input {
+            margin-bottom: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="player-container">
+        <h1>Audio Player with Fade-Out Timer</h1>
+        
+        <div class="file-input">
+            <label for="audio-file">Select Audio File:</label>
+            <input type="file" id="audio-file" accept="audio/*">
+        </div>
+        
+        <div class="control-group">
+            <button id="play-btn">Play</button>
+            <button id="pause-btn">Pause</button>
+            <button id="stop-btn">Stop</button>
+        </div>
+        
+        <div class="control-group">
+            <label for="volume-slider">Volume: <span id="volume-value" class="value-display">100%</span></label>
+            <input type="range" id="volume-slider" min="0" max="1" step="0.01" value="1">
+        </div>
+        
+        <div class="control-group">
+            <label for="tempo-slider">Tempo: <span id="tempo-value" class="value-display">100%</span></label>
+            <input type="range" id="tempo-slider" min="0.5" max="2" step="0.01" value="1">
+        </div>
+        
+        <div class="control-group">
+            <label for="fade-time">Fade-Out Time (seconds):</label>
+            <input type="number" id="fade-time" min="1" max="300" value="10">
+            <button id="start-fade-btn">Start Fade</button>
+            <button id="cancel-fade-btn">Cancel Fade</button>
+        </div>
+        
+        <div class="status" id="status-message">No file selected</div>
+    </div>
+
+    <script>
+        // Audio context and nodes
+        let audioContext;
+        let source;
+        let gainNode;
+        let audioBuffer;
+        let startTime;
+        let pausedAt = 0;
+        let isPlaying = false;
+        let audioFile;
+        
+        // Original values for fading
+        let originalVolume = 1;
+        let originalTempo = 1;
+        
+        // Fade timer
+        let fadeStartTime;
+        let fadeDuration;
+        let fadeInterval;
+        let isFading = false;
+        
+        // DOM elements
+        const fileInput = document.getElementById('audio-file');
+        const playBtn = document.getElementById('play-btn');
+        const pauseBtn = document.getElementById('pause-btn');
+        const stopBtn = document.getElementById('stop-btn');
+        const volumeSlider = document.getElementById('volume-slider');
+        const volumeValue = document.getElementById('volume-value');
+        const tempoSlider = document.getElementById('tempo-slider');
+        const tempoValue = document.getElementById('tempo-value');
+        const fadeTimeInput = document.getElementById('fade-time');
+        const startFadeBtn = document.getElementById('start-fade-btn');
+        const cancelFadeBtn = document.getElementById('cancel-fade-btn');
+        const statusMessage = document.getElementById('status-message');
+        
+        // Initialize audio context on user interaction (required by browsers)
+        function initAudio() {
+            if (!audioContext) {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                gainNode = audioContext.createGain();
+                gainNode.connect(audioContext.destination);
+            }
+        }
+        
+        // Calculate current value during fade
+        function calculateCurrentValue(startValue, elapsedTime, totalFadeTime) {
+            const reductionFactor = Math.min(elapsedTime / totalFadeTime, 1);
+            const targetValue = startValue * 0.5; // 50% of original
+            return startValue - (reductionFactor * (startValue - targetValue));
+        }
+        
+        // Update UI controls
+        function updateControls() {
+            playBtn.disabled = !audioBuffer || isPlaying;
+            pauseBtn.disabled = !isPlaying;
+            stopBtn.disabled = !isPlaying && pausedAt === 0;
+            startFadeBtn.disabled = !isPlaying || isFading;
+            cancelFadeBtn.disabled = !isFading;
+        }
+        
+        // Load audio file
+        fileInput.addEventListener('change', async function(e) {
+            initAudio();
+            
+            if (isPlaying) {
+                source.stop();
+                isPlaying = false;
+            }
+            
+            pausedAt = 0;
+            audioFile = e.target.files[0];
+            
+            if (audioFile) {
+                statusMessage.textContent = `Loading: ${audioFile.name}`;
+                
+                try {
+                    const arrayBuffer = await audioFile.arrayBuffer();
+                    audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+                    statusMessage.textContent = `Loaded: ${audioFile.name}`;
+                } catch (error) {
+                    statusMessage.textContent = `Error loading audio: ${error.message}`;
+                    audioBuffer = null;
+                }
+            } else {
+                statusMessage.textContent = 'No file selected';
+                audioBuffer = null;
+            }
+            
+            updateControls();
+        });
+        
+        // Play audio
+        playBtn.addEventListener('click', function() {
+            if (!audioBuffer) return;
+            
+            initAudio();
+            
+            // If audio context is suspended (e.g., browser policy), resume it
+            if (audioContext.state === 'suspended') {
+                audioContext.resume();
+            }
+            
+            // Create new source node (required each time we play)
+            source = audioContext.createBufferSource();
+            source.buffer = audioBuffer;
+            source.connect(gainNode);
+            
+            // Set playback rate (tempo)
+            source.playbackRate.value = parseFloat(tempoSlider.value);
+            
+            // Calculate start position (if resuming from pause)
+            const offset = pausedAt > 0 ? pausedAt : 0;
+            
+            // Start playback
+            source.start(0, offset);
+            startTime = audioContext.currentTime - offset;
+            pausedAt = 0;
+            isPlaying = true;
+            
+            statusMessage.textContent = 'Playing';
+            updateControls();
+        });
+        
+        // Pause audio
+        pauseBtn.addEventListener('click', function() {
+            if (!isPlaying) return;
+            
+            // Calculate current position
+            pausedAt = audioContext.currentTime - startTime;
+            
+            // Stop current source
+            source.stop();
+            isPlaying = false;
+            
+            // Cancel fade if active
+            if (isFading) {
+                cancelFade();
+            }
+            
+            statusMessage.textContent = 'Paused';
+            updateControls();
+        });
+        
+        // Stop audio
+        stopBtn.addEventListener('click', function() {
+            if (isPlaying) {
+                source.stop();
+                isPlaying = false;
+            }
+            
+            pausedAt = 0;
+            
+            // Cancel fade if active
+            if (isFading) {
+                cancelFade();
+            }
+            
+            statusMessage.textContent = 'Stopped';
+            updateControls();
+        });
+        
+        // Volume change
+        volumeSlider.addEventListener('input', function() {
+            const volume = parseFloat(this.value);
+            if (gainNode) {
+                gainNode.gain.value = volume;
+            }
+            volumeValue.textContent = `${Math.round(volume * 100)}%`;
+            
+            // If not fading, update original volume
+            if (!isFading) {
+                originalVolume = volume;
+            }
+        });
+        
+        // Tempo change
+        tempoSlider.addEventListener('input', function() {
+            const tempo = parseFloat(this.value);
+            if (source) {
+                source.playbackRate.value = tempo;
+            }
+            tempoValue.textContent = `${Math.round(tempo * 100)}%`;
+            
+            // If not fading, update original tempo
+            if (!isFading) {
+                originalTempo = tempo;
+            }
+        });
+        
+        // Start fade
+        startFadeBtn.addEventListener('click', function() {
+            if (!isPlaying || isFading) return;
+            
+            fadeDuration = parseFloat(fadeTimeInput.value);
+            if (isNaN(fadeDuration) || fadeDuration <= 0) {
+                statusMessage.textContent = 'Please enter a valid fade time';
+                return;
+            }
+            
+            // Record original values
+            originalVolume = parseFloat(volumeSlider.value);
+            originalTempo = parseFloat(tempoSlider.value);
+            
+            // Start fade timer
+            fadeStartTime = Date.now();
+            isFading = true;
+            
+            // Set up interval for smooth fading
+            fadeInterval = setInterval(updateFade, 50); // Update every 50ms
+            
+            statusMessage.textContent = `Fading out over ${fadeDuration} seconds`;
+            updateControls();
+        });
+        
+        // Cancel fade
+        cancelFadeBtn.addEventListener('click', cancelFade);
+        
+        function cancelFade() {
+            clearInterval(fadeInterval);
+            isFading = false;
+            statusMessage.textContent = 'Fade cancelled';
+            updateControls();
+        }
+        
+        // Update fade values
+        function updateFade() {
+            const now = Date.now();
+            const elapsedTime = (now - fadeStartTime) / 1000; // Convert to seconds
+            
+            if (elapsedTime >= fadeDuration) {
+                // Fade completed
+                volumeSlider.value = originalVolume * 0.5;
+                tempoSlider.value = originalTempo * 0.5;
+                
+                if (gainNode) {
+                    gainNode.gain.value = volumeSlider.value;
+                }
+                if (source) {
+                    source.playbackRate.value = tempoSlider.value;
+                }
+                
+                volumeValue.textContent = `${Math.round(volumeSlider.value * 100)}%`;
+                tempoValue.textContent = `${Math.round(tempoSlider.value * 100)}%`;
+                
+                clearInterval(fadeInterval);
+                isFading = false;
+                statusMessage.textContent = 'Fade completed';
+                updateControls();
+                return;
+            }
+            
+            // Calculate and set current values
+            const currentVolume = calculateCurrentValue(originalVolume, elapsedTime, fadeDuration);
+            const currentTempo = calculateCurrentValue(originalTempo, elapsedTime, fadeDuration);
+            
+            volumeSlider.value = currentVolume;
+            tempoSlider.value = currentTempo;
+            
+            if (gainNode) {
+                gainNode.gain.value = currentVolume;
+            }
+            if (source) {
+                source.playbackRate.value = currentTempo;
+            }
+            
+            volumeValue.textContent = `${Math.round(currentVolume * 100)}%`;
+            tempoValue.textContent = `${Math.round(currentTempo * 100)}%`;
+        }
+        
+        // Initialize UI
+        updateControls();
+    </script>
+</body>
+</html>
